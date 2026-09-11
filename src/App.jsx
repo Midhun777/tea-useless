@@ -196,10 +196,17 @@ export default function App() {
   };
 
   const handleTrySample = async (sample = SAMPLE_SPECIMENS[0]) => {
-    const url = sample.getDataUrl();
-    setPreviewUrl(url);
-    setSelectedFile({ name: `${sample.title}.png`, size: 245000 });
-    await runAnalysis(url);
+    setScanStatus('LOADING SAMPLE PHOTO...');
+    setIsScanning(true);
+    try {
+      const url = await sample.getDataUrl();
+      setPreviewUrl(url);
+      setSelectedFile({ name: `${sample.title}.jpg`, size: 0 });
+      await runAnalysis(url);
+    } catch (err) {
+      setOpenCVError('Failed to load sample: ' + err.message);
+      setIsScanning(false);
+    }
   };
 
   const handleFileSelect = async (file) => {
