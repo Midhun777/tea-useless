@@ -1,13 +1,13 @@
 import React from 'react';
 import { motion } from 'framer-motion';
 
-export function BubbleOverlay({ 
-  bubbleResult, 
-  vizMode = 'ACCEPTED', 
-  naturalWidth, 
-  naturalHeight, 
-  containerWidth, 
-  containerHeight 
+export function BubbleOverlay({
+  bubbleResult,
+  vizMode = 'ACCEPTED',
+  naturalWidth,
+  naturalHeight,
+  containerWidth,
+  containerHeight
 }) {
   if (!bubbleResult || !naturalWidth || !naturalHeight || !containerWidth || !containerHeight) {
     return null;
@@ -99,11 +99,11 @@ export function BubbleOverlay({
                   fontWeight="600"
                   className="select-none opacity-95 drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)]"
                 >
-                  {vizMode === 'REJECTED' 
-                    ? `[${b.reason || 'rej'}]` 
+                  {vizMode === 'REJECTED'
+                    ? `[${b.reason || 'rej'}]`
                     : vizMode === 'CONFIDENCE'
-                    ? `${Math.round((b.confidence || 0) * 100)}%`
-                    : `#${b.id}`}
+                      ? `${Math.round((b.confidence || 0) * 100)}%`
+                      : `#${b.id}`}
                 </text>
               )}
             </g>

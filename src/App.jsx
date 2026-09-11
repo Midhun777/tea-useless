@@ -5,109 +5,125 @@ import { UploadZone } from './components/UploadZone';
 import { AnalysisScannerOverlay } from './components/AnalysisScannerOverlay';
 import { ResultsDashboard } from './components/results/ResultsDashboard';
 import { SAMPLE_SPECIMENS } from './components/illustrations/SampleSpecimensData';
-import { analyzeTeaWithMoondream, fileToDataUrl } from './lib/moondreamClient';
+import {
+  processSpecimenPipeline,
+  loadOpenCV,
+  isOpenCVReady,
+  DEFAULT_PREPROCESSING_CONFIG,
+  DEFAULT_ROI_CONFIG,
+  DEFAULT_HOUGH_CONFIG,
+  DEFAULT_CONTOUR_CONFIG,
+  DEFAULT_FILTER_CONFIG
+} from './lib/visionUtils';
+
+/**
+ * Converts a File object to a base64 Data URL.
+ */
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload  = () => resolve(reader.result);
+    reader.onerror = (err) => reject(err);
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Loads an HTMLImageElement from a data URL. Resolves when image is decoded.
+ */
+function loadImageElement(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload  = () => resolve(img);
+    img.onerror = () => reject(new Error('Failed to load image for OpenCV analysis.'));
+    img.src = dataUrl;
+  });
+}
 
 export default function App() {
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [previewUrl, setPreviewUrl] = useState(null);
-  const [isScanning, setIsScanning] = useState(false);
-  const [scanStatus, setScanStatus] = useState(null);
+  const [selectedFile,  setSelectedFile]  = useState(null);
+  const [previewUrl,    setPreviewUrl]    = useState(null);
+  const [isScanning,    setIsScanning]    = useState(false);
+  const [scanStatus,    setScanStatus]    = useState(null);
   const currentImgRef = useRef(null);
 
   // Vision state
-  const [openCVStatus] = useState('READY');
-  const [openCVError, setOpenCVError] = useState(null);
+  const [openCVStatus]                    = useState('READY');
+  const [openCVError,   setOpenCVError]   = useState(null);
   const [matrixTelemetry, setMatrixTelemetry] = useState(null);
 
   // Vision Pipeline State
-  const [currentRoi, setCurrentRoi] = useState(null);
-  const [bubbleResult, setBubbleResult] = useState(null);
-  const [vizMode, setVizMode] = useState('ACCEPTED');
-  const [calibration] = useState({ enabled: false, pixelsPerMillimeter: null });
-  const [statistics, setStatistics] = useState(null);
+  const [currentRoi,    setCurrentRoi]    = useState(null);
+  const [bubbleResult,  setBubbleResult]  = useState(null);
+  const [vizMode,       setVizMode]       = useState('ACCEPTED');
+  const [calibration]                     = useState({ enabled: false, pixelsPerMillimeter: null });
+  const [statistics,    setStatistics]    = useState(null);
 
-  // Main Moondream Vision Pipeline trigger
-  const runMoondreamAnalysis = async (dataUrl) => {
+  // ---------------------------------------------------------------------------
+  // Main OpenCV dual-branch analysis pipeline
+  // ---------------------------------------------------------------------------
+  const runOpenCVAnalysis = async (dataUrl) => {
     setIsScanning(true);
     setOpenCVError(null);
+    setBubbleResult(null);
+    setStatistics(null);
 
     try {
-      // 1. Call server backend for Moondream spatial bubble detection & deduplication
-      const res = await analyzeTeaWithMoondream(dataUrl, (stage) => setScanStatus(stage));
+      // Ensure OpenCV WebAssembly is loaded
+      setScanStatus('LOADING OPENCV ENGINE');
+      if (!isOpenCVReady()) {
+        await loadOpenCV();
+      }
 
-      // Standardize ROI and natural dimensions for canvas rendering
-      const img = new Image();
-      img.src = dataUrl;
-      await new Promise((r) => { img.onload = r; });
+      // Load the image as HTMLImageElement for imageToMat()
+      setScanStatus('ACQUIRING SPECIMEN');
+      const imgElement = await loadImageElement(dataUrl);
+      currentImgRef.current = imgElement;
 
-      const w = img.naturalWidth || 800;
-      const h = img.naturalHeight || 600;
+      // Run the full dual-branch pipeline
+      const result = await processSpecimenPipeline(
+        imgElement,
+        DEFAULT_PREPROCESSING_CONFIG,
+        DEFAULT_ROI_CONFIG,
+        DEFAULT_HOUGH_CONFIG,
+        DEFAULT_CONTOUR_CONFIG,
+        DEFAULT_FILTER_CONFIG,
+        calibration,
+        (stage) => setScanStatus(stage)
+      );
 
-      // Convert normalized 0..1 bubble coordinates to image natural pixel dimensions
-      const pixelBubbles = (res.bubbles || []).map((b) => ({
-        ...b,
-        x: Math.round(b.x * w),
-        y: Math.round(b.y * h),
-        radius: Math.max(4, Math.round((b.radius || 0.015) * Math.min(w, h)))
-      }));
+      // Wire ROI to pixel coordinates for overlay rendering
+      const roiForOverlay = result.roi
+        ? {
+            center: { x: Math.round(result.roi.centerX), y: Math.round(result.roi.centerY) },
+            radius: Math.round(result.roi.radius),
+            boundaryPoints: []
+          }
+        : {
+            center: { x: Math.round(imgElement.naturalWidth / 2), y: Math.round(imgElement.naturalHeight / 2) },
+            radius: Math.round(Math.min(imgElement.naturalWidth, imgElement.naturalHeight) * 0.42),
+            boundaryPoints: []
+          };
 
-      const pixelRaw = (res.rawCandidates || []).map((b) => ({
-        ...b,
-        x: Math.round(b.x * w),
-        y: Math.round(b.y * h),
-        radius: Math.max(4, Math.round((b.radius || 0.015) * Math.min(w, h)))
-      }));
-
-      const pixelRejected = (res.rejectedCandidates || []).map((b) => ({
-        ...b,
-        x: Math.round(b.x * w),
-        y: Math.round(b.y * h),
-        radius: Math.max(4, Math.round((b.radius || 0.015) * Math.min(w, h)))
-      }));
-
-      const formattedResult = {
-        count: res.count,
-        bubbleCount: res.count,
-        acceptedBubbles: pixelBubbles,
-        rawCandidates: pixelRaw,
-        rejectedCandidates: pixelRejected,
-        surfaceDetected: res.surfaceDetected,
-        surfaceDescription: res.surfaceDescription,
-        verificationCount: res.verificationCount,
-        status: res.status,
-        warnings: res.warnings
-      };
-
-      setBubbleResult(formattedResult);
-
-      setCurrentRoi({
-        center: { x: Math.round(w / 2), y: Math.round(h / 2) },
-        radius: Math.round(Math.min(w, h) * 0.42),
-        boundaryPoints: []
-      });
-
-      setStatistics({
-        count: res.count,
-        surfaceDetected: res.surfaceDetected,
-        verificationCount: res.verificationCount,
-        confidence: { mean: 0.94 },
-        sizeDistribution: [
-          { label: '<1mm', count: Math.round(res.count * 0.38) },
-          { label: '1-2mm', count: Math.round(res.count * 0.36) },
-          { label: '2-4mm', count: Math.round(res.count * 0.20) },
-          { label: '>4mm', count: Math.round(res.count * 0.06) },
-        ]
-      });
+      setCurrentRoi(roiForOverlay);
+      setBubbleResult(result.bubbleResult);
+      setStatistics(result.statistics);
 
       setMatrixTelemetry({
-        width: w,
-        height: h,
-        ...res.telemetry
+        width: result.finalTelemetry.width,
+        height: result.finalTelemetry.height,
+        model: 'OpenCV Dual-Branch (Hough + Contour/Watershed)',
+        executionTimeMs: result.executionTimeMs,
+        isDemoFallback: false,
+        moondreamEngine: 'N/A — Full OpenCV Local',
+        branchTelemetry: result.bubbleResult?.branchTelemetry || {},
+        sizeBreakdown: result.bubbleResult?.sizeBreakdown || {}
       });
 
     } catch (err) {
-      console.error('Vision Pipeline Error:', err);
-      setOpenCVError(err.message || 'Vision Analysis Failed');
+      console.error('OpenCV Vision Pipeline Error:', err);
+      setOpenCVError(err.message || 'OpenCV Vision Analysis Failed');
+    } finally {
       setIsScanning(false);
       setScanStatus(null);
     }
@@ -128,7 +144,7 @@ export default function App() {
     const sampleDataUrl = sample.getDataUrl();
     setPreviewUrl(sampleDataUrl);
     setSelectedFile({ name: `${sample.title}.png`, size: 245000 });
-    await runMoondreamAnalysis(sampleDataUrl);
+    await runOpenCVAnalysis(sampleDataUrl);
   };
 
   // File selection handler
@@ -139,16 +155,16 @@ export default function App() {
     const dataUrl = await fileToDataUrl(file);
     setSelectedFile(file);
     setPreviewUrl(dataUrl);
-    await runMoondreamAnalysis(dataUrl);
+    await runOpenCVAnalysis(dataUrl);
   };
 
-  // Scan transition completed
+  // Scan transition completed (animation done)
   const handleScanComplete = useCallback(() => {
     setIsScanning(false);
     setScanStatus(null);
   }, []);
 
-  // Reset to empty state / Home
+  // Reset to empty state
   const handleRunNewAnalysis = () => {
     if (previewUrl && !previewUrl.startsWith('data:')) {
       URL.revokeObjectURL(previewUrl);
@@ -159,6 +175,8 @@ export default function App() {
     setScanStatus(null);
     setBubbleResult(null);
     setStatistics(null);
+    setMatrixTelemetry(null);
+    setCurrentRoi(null);
     currentImgRef.current = null;
   };
 
@@ -171,9 +189,9 @@ export default function App() {
   return (
     <MainLayout openCVStatus={openCVStatus} onReset={previewUrl ? handleRunNewAnalysis : null}>
       {/* 1. Hero Section */}
-      <Hero 
-        onCountClick={handleScrollToUpload} 
-        onTrySampleClick={() => handleTrySample(SAMPLE_SPECIMENS[0])} 
+      <Hero
+        onCountClick={handleScrollToUpload}
+        onTrySampleClick={() => handleTrySample(SAMPLE_SPECIMENS[0])}
       />
 
       {/* 2. Main Workspace State Machine */}
@@ -196,7 +214,7 @@ export default function App() {
           />
         )}
 
-        {/* State C: Illustrated Scientific Field Report */}
+        {/* State C: Results Dashboard */}
         {previewUrl && !isScanning && (
           <ResultsDashboard
             file={selectedFile}

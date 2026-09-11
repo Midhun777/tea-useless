@@ -87,34 +87,36 @@ export function calculateNearestNeighbourDistances(bubbles, pxPerMm = null) {
 }
 
 /**
- * Generates histogram-ready size distribution bins based on candidate radii
+ * Generates named size distribution bins (Small / Medium / Large) aligned
+ * with BUBBLE_SIZE_THRESHOLDS from config.js.
+ *
+ * @param {Array} bubbles  Array of bubble objects with radius and optional sizeClass
+ * @returns {Array} [{ label, range, count }, ...]
  */
-export function calculateSizeDistribution(radii, numBins = 4) {
-  if (!radii || radii.length === 0) return [];
+export function calculateSizeDistribution(bubbles) {
+  if (!bubbles || bubbles.length === 0) return [];
 
-  const minR = Math.floor(Math.min(...radii));
-  const maxR = Math.ceil(Math.max(...radii));
+  // Import thresholds inline to avoid circular dep
+  const SMALL_MAX = 8;   // radius < 8 px
+  const MEDIUM_MAX = 22; // 8 <= radius <= 22 px
 
-  if (minR === maxR) {
-    return [{ range: `${minR} px`, count: radii.length }];
-  }
+  const small  = bubbles.filter(b => (b.sizeClass === 'small'  || b.radius < SMALL_MAX)).length;
+  const medium = bubbles.filter(b => (b.sizeClass === 'medium' || (b.radius >= SMALL_MAX && b.radius <= MEDIUM_MAX)) && b.sizeClass !== 'small' && b.sizeClass !== 'large').length;
+  const large  = bubbles.filter(b => (b.sizeClass === 'large'  || b.radius > MEDIUM_MAX)).length;
 
-  const binWidth = Math.max(1, Math.ceil((maxR - minR) / numBins));
-  const bins = [];
+  // Recount cleanly when sizeClass is present
+  const byClass = bubbles.reduce((acc, b) => {
+    const cls = b.sizeClass ||
+      (b.radius < SMALL_MAX ? 'small' : b.radius <= MEDIUM_MAX ? 'medium' : 'large');
+    acc[cls] = (acc[cls] || 0) + 1;
+    return acc;
+  }, {});
 
-  for (let i = 0; i < numBins; i++) {
-    const start = minR + (i * binWidth);
-    const end = (i === numBins - 1) ? maxR : start + binWidth;
-    
-    const count = radii.filter(r => (i === numBins - 1) ? (r >= start && r <= end) : (r >= start && r < end)).length;
-    
-    bins.push({
-      range: `${start}–${end} px`,
-      count
-    });
-  }
-
-  return bins;
+  return [
+    { label: 'Small',  range: `< ${SMALL_MAX} px`,            count: byClass.small  || 0 },
+    { label: 'Medium', range: `${SMALL_MAX}–${MEDIUM_MAX} px`, count: byClass.medium || 0 },
+    { label: 'Large',  range: `> ${MEDIUM_MAX} px`,           count: byClass.large  || 0 }
+  ];
 }
 
 /**
@@ -202,8 +204,15 @@ export function calculateBubbleStatistics(bubbles = [], roi = null, calibration 
   const minConf = parseFloat(Math.min(...confidences).toFixed(2));
   const maxConf = parseFloat(Math.max(...confidences).toFixed(2));
 
-  // 6. Size distribution histogram
-  const sizeDistribution = calculateSizeDistribution(rawRadii, 4);
+  // 6. Size distribution histogram (named Small/Medium/Large bins)
+  const sizeDistribution = calculateSizeDistribution(bubbles);
+
+  // 6b. Size class breakdown counts (from sizeClass field if present)
+  const sizeClassBreakdown = {
+    small:  bubbles.filter(b => (b.sizeClass || '') === 'small'  || (!b.sizeClass && b.radius < 8)).length,
+    medium: bubbles.filter(b => (b.sizeClass || '') === 'medium' || (!b.sizeClass && b.radius >= 8 && b.radius <= 22)).length,
+    large:  bubbles.filter(b => (b.sizeClass || '') === 'large'  || (!b.sizeClass && b.radius > 22)).length
+  };
 
   // 7. Spatial distribution (Center of mass & spread)
   const xValues = bubbles.map(b => b.x);
@@ -244,6 +253,7 @@ export function calculateBubbleStatistics(bubbles = [], roi = null, calibration 
       max: maxConf
     },
     sizeDistribution,
+    sizeClassBreakdown,
     spatial: {
       centerX: spatialCenterX,
       centerY: spatialCenterY,

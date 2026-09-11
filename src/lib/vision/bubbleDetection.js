@@ -1,26 +1,50 @@
 /**
- * BUBBLE-X Bubble Detection & Filtering Engine (v2)
- * 
- * Uses OpenCV.js Hough Circle Transform for candidate detection, followed by 
- * feature extraction, heuristic confidence scoring, threshold validation, 
- * rejection categorization, and spatial NMS deduplication.
+ * BUBBLE-X Dual-Branch Bubble Detection Orchestrator (v3)
+ *
+ * Runs two parallel OpenCV detection branches and merges their results:
+ *
+ *   Branch A — Hough (houghDetection.js)
+ *     → prioritises LARGE + faint + circular bubbles
+ *     → extra soft blur, low accumulator threshold, radius 12–120 px
+ *
+ *   Branch B — Contour/Watershed (contourDetection.js)
+ *     → prioritises SMALL + touching + visible bubbles
+ *     → adaptive threshold, morph open, watershed, circularity filter, radius 2–30 px
+ *
+ * After both branches complete:
+ *   1. Valid candidates from both branches are merged
+ *   2. Cross-branch IoU NMS deduplication removes duplicates
+ *   3. Every accepted bubble is tagged with sizeClass: 'small'|'medium'|'large'
+ *   4. Consecutive IDs (#1, #2…) are assigned to final accepted set
  */
 
-import { validateBubbleConfig, validateFilterConfig } from './config';
-import { createRoiMaskMat } from './roiMask';
-import { extractCandidateFeatures, evaluateCandidate, deduplicateCandidates } from './bubbleFilter';
-import { deleteMat } from '../opencv';
+import { validateHoughConfig, validateContourConfig, validateFilterConfig } from './config';
+import { detectHoughBubbles } from './houghDetection';
+import { detectContourBubbles } from './contourDetection';
+import { classifyBubbleSize, deduplicateCandidates } from './bubbleFilter';
 
 /**
- * Detects, validates, filters, and deduplicates bubble candidates inside the tea ROI.
- * 
- * @param {cv.Mat} preprocessedMat Single-channel grayscale matrix (CV_8UC1)
- * @param {Object} roi Tea surface ROI { type, centerX, centerY, radius }
- * @param {Object} rawBubbleConfig Hough detection parameters
- * @param {Object} rawFilterConfig Candidate filtering parameters
- * @returns {Object} { rawCandidates, acceptedBubbles, rejectedCandidates, rawCandidateCount, rejectedCandidateCount, duplicateCount, bubbleCount, processingTimeMs }
+ * Yields the main thread before/after heavy WASM operations.
  */
-export function detectBubbles(preprocessedMat, roi, rawBubbleConfig = {}, rawFilterConfig = {}) {
+const yieldToMain = () => new Promise(resolve => setTimeout(resolve, 0));
+
+/**
+ * Full dual-branch bubble detection pipeline.
+ *
+ * @param {cv.Mat} preprocessedMat  Grayscale CV_8UC1 matrix
+ * @param {Object} roi              Tea ROI { centerX, centerY, radius, ... }
+ * @param {Object} rawHoughConfig   Hough branch config overrides
+ * @param {Object} rawContourConfig Contour branch config overrides
+ * @param {Object} rawFilterConfig  Shared post-merge filter config overrides
+ * @returns {Promise<Object>} Full detection result object
+ */
+export async function detectBubbles(
+  preprocessedMat,
+  roi,
+  rawHoughConfig = {},
+  rawContourConfig = {},
+  rawFilterConfig = {}
+) {
   const cv = window.cv;
   if (!cv || !cv.Mat) {
     throw new Error('OpenCV.js is not initialized for bubble detection.');
@@ -30,124 +54,110 @@ export function detectBubbles(preprocessedMat, roi, rawBubbleConfig = {}, rawFil
     throw new Error('Invalid preprocessed image matrix provided for bubble detection.');
   }
 
-  const bubbleConfig = validateBubbleConfig(rawBubbleConfig);
-  const filterConfig = validateFilterConfig(rawFilterConfig);
-  const width = preprocessedMat.cols;
-  const height = preprocessedMat.rows;
+  const houghConfig   = validateHoughConfig(rawHoughConfig);
+  const contourConfig = validateContourConfig(rawContourConfig);
+  const filterConfig  = validateFilterConfig(rawFilterConfig);
 
   const startTime = performance.now();
-  const allocatedMats = [];
 
-  const rawCandidates = [];
-  const validCandidates = [];
-  const rejectedCandidates = [];
-
+  // -------------------------------------------------------------------------
+  // Branch A: Hough — large, faint, circular bubbles
+  // -------------------------------------------------------------------------
+  let houghCandidates = [];
   try {
-    // 1. Create binary ROI mask matrix (255 = inside ROI, 0 = background)
-    const maskMat = createRoiMaskMat(width, height, roi);
-    allocatedMats.push(maskMat);
-
-    // 2. Apply ROI mask (bitwise AND) to isolate tea surface
-    const maskedMat = new cv.Mat();
-    allocatedMats.push(maskedMat);
-    cv.bitwise_and(preprocessedMat, preprocessedMat, maskedMat, maskMat);
-
-    // 3. Execute OpenCV.js Hough Circle Transform
-    const circlesMat = new cv.Mat();
-    allocatedMats.push(circlesMat);
-
-    cv.HoughCircles(
-      maskedMat,
-      circlesMat,
-      cv.HOUGH_GRADIENT,
-      bubbleConfig.dp,
-      bubbleConfig.minDist,
-      bubbleConfig.param1,
-      bubbleConfig.param2,
-      bubbleConfig.minRadius,
-      bubbleConfig.maxRadius
-    );
-
-    const numCircles = circlesMat.cols;
-
-    // 4. Extract raw candidates, extract features, and evaluate filtering rules
-    for (let i = 0; i < numCircles; i++) {
-      const x = circlesMat.data32F[i * 3];
-      const y = circlesMat.data32F[i * 3 + 1];
-      const r = circlesMat.data32F[i * 3 + 2];
-
-      const rawCandidate = {
-        id: i + 1,
-        x: Math.round(x),
-        y: Math.round(y),
-        radius: Math.round(r),
-        detectionMethod: 'hough'
-      };
-
-      rawCandidates.push(rawCandidate);
-
-      // Feature extraction (ROI coverage, local contrast, edge strength, circularity)
-      const features = extractCandidateFeatures(preprocessedMat, roi, rawCandidate);
-
-      // Validation evaluation
-      const evalResult = evaluateCandidate(
-        rawCandidate, 
-        features, 
-        filterConfig, 
-        bubbleConfig.minRadius, 
-        bubbleConfig.maxRadius
-      );
-
-      const candidateObject = {
-        ...rawCandidate,
-        ...features,
-        confidence: evalResult.confidence
-      };
-
-      if (evalResult.isValid) {
-        validCandidates.push(candidateObject);
-      } else {
-        rejectedCandidates.push({
-          ...candidateObject,
-          reason: evalResult.reason
-        });
-      }
-    }
-
-    // 5. Perform Spatial NMS Deduplication
-    const { acceptedBubbles, duplicates } = deduplicateCandidates(
-      validCandidates, 
-      filterConfig.duplicateDistanceFactor
-    );
-
-    // Append duplicates to rejectedCandidates list with reason 'duplicate'
-    rejectedCandidates.push(...duplicates);
-
-    // Re-assign clean consecutive IDs (#1, #2, #3...) to accepted final bubbles
-    const finalBubbles = acceptedBubbles.map((b, idx) => ({
-      ...b,
-      id: idx + 1
-    }));
-
-    const endTime = performance.now();
-    const processingTimeMs = parseFloat((endTime - startTime).toFixed(1));
-
-    return {
-      rawCandidates,
-      acceptedBubbles: finalBubbles,
-      rejectedCandidates,
-      rawCandidateCount: rawCandidates.length,
-      rejectedCandidateCount: rejectedCandidates.length,
-      duplicateCount: duplicates.length,
-      bubbleCount: finalBubbles.length,
-      processingTimeMs,
-      bubbleConfig,
-      filterConfig
-    };
-  } finally {
-    // GUARANTEED MEMORY CLEANUP: Delete all temporary WASM OpenCV matrices
-    allocatedMats.forEach(mat => {
-      if (mat && typeof mat.delete === 'function') deleteMat(mat);
-    });
+    await yieldToMain();
+    houghCandidates = detectHoughBubbles(preprocessedMat, roi, rawHoughConfig, rawFilterConfig);
+  } catch (err) {
+    console.warn('[Hough Branch Error]', err.message);
   }
+
+  // -------------------------------------------------------------------------
+  // Branch B: Contour/Watershed — small, touching, visible bubbles
+  // -------------------------------------------------------------------------
+  let contourCandidates = [];
+  try {
+    await yieldToMain();
+    contourCandidates = detectContourBubbles(preprocessedMat, roi, rawContourConfig, rawFilterConfig);
+  } catch (err) {
+    console.warn('[Contour Branch Error]', err.message);
+  }
+
+  // -------------------------------------------------------------------------
+  // Merge: combine all raw candidates for telemetry
+  // -------------------------------------------------------------------------
+  const allRawCandidates = [...houghCandidates, ...contourCandidates];
+
+  // Separate valid from invalid (per-branch validation already done)
+  const validCandidates    = allRawCandidates.filter(c => c.isValid);
+  const preMergeRejected   = allRawCandidates.filter(c => !c.isValid);
+
+  // -------------------------------------------------------------------------
+  // Cross-branch IoU NMS Deduplication
+  // -------------------------------------------------------------------------
+  const { acceptedBubbles, duplicates } = deduplicateCandidates(
+    validCandidates,
+    filterConfig.duplicateDistanceFactor
+  );
+
+  // -------------------------------------------------------------------------
+  // Size Classification + clean final IDs
+  // -------------------------------------------------------------------------
+  const finalBubbles = acceptedBubbles.map((b, idx) => ({
+    ...b,
+    id: idx + 1,
+    sizeClass: classifyBubbleSize(b.radius)
+  }));
+
+  // Collect all rejected (per-branch + duplicates) for debug overlay
+  const allRejected = [
+    ...preMergeRejected,
+    ...duplicates
+  ];
+
+  const endTime = performance.now();
+  const processingTimeMs = parseFloat((endTime - startTime).toFixed(1));
+
+  // -------------------------------------------------------------------------
+  // Branch telemetry breakdown
+  // -------------------------------------------------------------------------
+  const houghAccepted   = finalBubbles.filter(b => b.detectionMethod === 'hough').length;
+  const contourAccepted = finalBubbles.filter(b => b.detectionMethod === 'contour').length;
+
+  const sizeBreakdown = {
+    small:  finalBubbles.filter(b => b.sizeClass === 'small').length,
+    medium: finalBubbles.filter(b => b.sizeClass === 'medium').length,
+    large:  finalBubbles.filter(b => b.sizeClass === 'large').length
+  };
+
+  return {
+    // Core detection results
+    acceptedBubbles:       finalBubbles,
+    rawCandidates:         allRawCandidates,
+    rejectedCandidates:    allRejected,
+
+    // Counts
+    bubbleCount:           finalBubbles.length,
+    rawCandidateCount:     allRawCandidates.length,
+    rejectedCandidateCount: allRejected.length,
+    duplicateCount:        duplicates.length,
+
+    // Branch breakdown
+    branchTelemetry: {
+      houghRaw:       houghCandidates.length,
+      houghValid:     houghCandidates.filter(c => c.isValid).length,
+      houghAccepted,
+      contourRaw:     contourCandidates.length,
+      contourValid:   contourCandidates.filter(c => c.isValid).length,
+      contourAccepted
+    },
+
+    // Size classification
+    sizeBreakdown,
+
+    // Timing & configs
+    processingTimeMs,
+    houghConfig,
+    contourConfig,
+    filterConfig
+  };
 }
