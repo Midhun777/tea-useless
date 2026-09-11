@@ -12,7 +12,7 @@ export function ReportExporter({ file, statistics, roi, bubbleResult, telemetry,
         fileSize: file?.size || 0,
       },
       heroResult: {
-        bubbleCount: statistics?.count || 63,
+        bubbleCount: statistics?.count || 0,
         confidence: statistics?.confidence?.mean ? (statistics.confidence.mean * 100).toFixed(1) + '%' : '98.4%',
         density: statistics?.density?.value ? statistics.density.value + ' / cm²' : '4.2 bubbles/cm²',
         coverage: statistics?.coveragePercent ? statistics.coveragePercent + '%' : '18.5%',

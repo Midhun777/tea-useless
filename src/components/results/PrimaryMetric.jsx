@@ -1,8 +1,8 @@
 import React from 'react';
 import { motion } from 'framer-motion';
 
-export function PrimaryMetric({ count = 63, meanConfidence = 0.984 }) {
-  const displayCount = count || 63;
+export function PrimaryMetric({ count = 0, meanConfidence = 0 }) {
+  const displayCount = count || 0;
   const confidencePct = (meanConfidence * 100).toFixed(1);
 
   return (

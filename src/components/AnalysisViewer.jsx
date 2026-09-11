@@ -85,7 +85,7 @@ export function AnalysisViewer({
     setPan({ x: 0, y: 0 });
   };
 
-  const candidateCount = bubbleResult ? (bubbleResult.bubbleCount || 63) : 63;
+  const candidateCount = bubbleResult ? (bubbleResult.bubbleCount || 0) : 0;
 
   return (
     <div className="w-full bg-[#FBF9F4] border-2 border-[#2C221E] p-5 shadow-editorial font-mono-spec text-xs relative">

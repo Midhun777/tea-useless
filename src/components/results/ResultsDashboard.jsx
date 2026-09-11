@@ -27,7 +27,7 @@ export function ResultsDashboard({
   onImageLoaded
 }) {
   const [showAbsurdReport, setShowAbsurdReport] = useState(false);
-  const bubbleCount = statistics ? statistics.count : (bubbleResult ? (bubbleResult.count || bubbleResult.bubbleCount) : 63);
+  const bubbleCount = statistics ? statistics.count : (bubbleResult ? (bubbleResult.count || bubbleResult.bubbleCount || 0) : 0);
 
   return (
     <motion.div

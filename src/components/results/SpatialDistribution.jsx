@@ -13,7 +13,7 @@ export function SpatialDistribution({ bubbles = [], roi, naturalWidth = 1280, na
   const roiY = roi ? roi.centerY * scale : svgHeight / 2;
   const roiR = roi ? roi.radius * scale : (svgWidth * 0.4);
 
-  const bubbleCount = bubbles ? bubbles.length : 63;
+  const bubbleCount = bubbles ? bubbles.length : 0;
 
   return (
     <div className="w-full bg-[#FBF9F4] border-2 border-[#2C221E] p-5 shadow-editorial text-left">

@@ -14,12 +14,9 @@ export function AnalysisScannerOverlay({ previewUrl, scanStatus = "SURFACE ANALY
     onScanCompleteRef.current = onScanComplete;
   }, [onScanComplete]);
 
-  // Animated incrementing bubble counter during scan
+  // Animated incrementing counter during scan — just shows scanning activity,
+  // the real count comes from OpenCV after the worker completes.
   useEffect(() => {
-    const targetCount = 63;
-    const duration = 2800; // ms
-    const stepTime = Math.floor(duration / targetCount);
-    
     let current = 0;
     const timer = setInterval(() => {
       current += 1;
@@ -27,17 +24,13 @@ export function AnalysisScannerOverlay({ previewUrl, scanStatus = "SURFACE ANALY
       if (current >= 15 && current < 35) setScanPhase(2);
       if (current >= 35 && current < 55) setScanPhase(3);
       if (current >= 55) setScanPhase(4);
-
-      if (current >= targetCount) {
-        clearInterval(timer);
-        setTimeout(() => {
-          if (onScanCompleteRef.current) onScanCompleteRef.current();
-        }, 500);
-      }
-    }, stepTime);
+      // Don't stop — the worker result drives actual completion via onScanComplete
+      if (current >= 999) clearInterval(timer); // safety cap
+    }, 45);
 
     return () => clearInterval(timer);
   }, []);
+
 
   // Animated detection reticle positions
   const detectionPins = [
