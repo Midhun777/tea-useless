@@ -104,9 +104,14 @@ export function detectContourBubbles(preprocessedMat, roi, rawContourConfig = {}
     const minAreaPx  = config.minAreaPx;
     const maxAreaPx  = Math.PI * config.maxRadius * config.maxRadius * 1.4; // generous upper bound
 
+    // Cap the number of contours processed to prevent JS-side iteration
+    // from becoming O(n) expensive on very noisy / high-contrast images
+    const MAX_CONTOURS = 800;
+    const totalContours = Math.min(contours.size(), MAX_CONTOURS);
+
     let idCounter = 0;
 
-    for (let ci = 0; ci < contours.size(); ci++) {
+    for (let ci = 0; ci < totalContours; ci++) {
       const contour = contours.get(ci);
 
       try {

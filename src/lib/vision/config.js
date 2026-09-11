@@ -6,7 +6,7 @@
  */
 
 export const DEFAULT_PREPROCESSING_CONFIG = {
-  maxDimension: 1280,
+  maxDimension: 800,   // Reduced from 1280 for ~4x faster WASM processing
   blurKernelSize: 5,
   blurSigma: 0,
   enableClahe: true,
@@ -38,11 +38,11 @@ export const DEFAULT_HOUGH_CONFIG = {
 
   // HoughCircles params
   dp: 1.2,            // Inverse resolution ratio (1 = same as input)
-  minDist: 20,        // Minimum distance between detected circle centres
+  minDist: 15,        // Minimum distance between detected circle centres
   param1: 80,         // Canny upper threshold (lower = more edges found)
-  param2: 12,         // Accumulator threshold — LOW = sensitive to faint circles
-  minRadius: 12,      // px — ignore tiny noise
-  maxRadius: 120      // px — capture large surface bubbles
+  param2: 20,         // Accumulator threshold — raised from 12 to reduce false positives
+  minRadius: 10,      // px — ignore tiny noise
+  maxRadius: 100      // px — capture large surface bubbles
 };
 
 // ---------------------------------------------------------------------------

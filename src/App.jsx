@@ -1,174 +1,222 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { MainLayout } from './layouts/MainLayout';
 import { Hero } from './components/Hero';
 import { UploadZone } from './components/UploadZone';
 import { AnalysisScannerOverlay } from './components/AnalysisScannerOverlay';
 import { ResultsDashboard } from './components/results/ResultsDashboard';
 import { SAMPLE_SPECIMENS } from './components/illustrations/SampleSpecimensData';
-import {
-  processSpecimenPipeline,
-  loadOpenCV,
-  isOpenCVReady,
-  DEFAULT_PREPROCESSING_CONFIG,
-  DEFAULT_ROI_CONFIG,
-  DEFAULT_HOUGH_CONFIG,
-  DEFAULT_CONTOUR_CONFIG,
-  DEFAULT_FILTER_CONFIG
-} from './lib/visionUtils';
+import { calculateBubbleStatistics } from './lib/visionUtils';
 
-/**
- * Converts a File object to a base64 Data URL.
- */
+// ─── Utilities ────────────────────────────────────────────────────────────────
+
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload  = () => resolve(reader.result);
-    reader.onerror = (err) => reject(err);
+    reader.onerror = reject;
     reader.readAsDataURL(file);
   });
 }
 
 /**
- * Loads an HTMLImageElement from a data URL. Resolves when image is decoded.
+ * Draws a data URL onto a canvas and extracts ImageData.
+ * Returns { imageData, width, height, naturalWidth, naturalHeight }
  */
-function loadImageElement(dataUrl) {
+function dataUrlToImageData(dataUrl) {
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.onload  = () => resolve(img);
-    img.onerror = () => reject(new Error('Failed to load image for OpenCV analysis.'));
+    img.onload = () => {
+      // Downscale to max 800px before sending to worker
+      const maxDim = 800;
+      const scale  = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
+      const w = Math.round(img.naturalWidth  * scale);
+      const h = Math.round(img.naturalHeight * scale);
+      const canvas = document.createElement('canvas');
+      canvas.width  = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+      resolve({
+        imageData:     ctx.getImageData(0, 0, w, h).data,
+        width:         w,
+        height:        h,
+        naturalWidth:  img.naturalWidth,
+        naturalHeight: img.naturalHeight
+      });
+    };
+    img.onerror = () => reject(new Error('Image load failed'));
     img.src = dataUrl;
   });
 }
 
+// ─── App ─────────────────────────────────────────────────────────────────────
+
 export default function App() {
-  const [selectedFile,  setSelectedFile]  = useState(null);
-  const [previewUrl,    setPreviewUrl]    = useState(null);
-  const [isScanning,    setIsScanning]    = useState(false);
-  const [scanStatus,    setScanStatus]    = useState(null);
-  const currentImgRef = useRef(null);
-
-  // Vision state
-  const [openCVStatus]                    = useState('READY');
-  const [openCVError,   setOpenCVError]   = useState(null);
+  const [selectedFile,    setSelectedFile]    = useState(null);
+  const [previewUrl,      setPreviewUrl]      = useState(null);
+  const [isScanning,      setIsScanning]      = useState(false);
+  const [scanStatus,      setScanStatus]      = useState(null);
+  const [openCVError,     setOpenCVError]     = useState(null);
   const [matrixTelemetry, setMatrixTelemetry] = useState(null);
+  const [currentRoi,      setCurrentRoi]      = useState(null);
+  const [bubbleResult,    setBubbleResult]    = useState(null);
+  const [vizMode,         setVizMode]         = useState('ACCEPTED');
+  const [calibration]                         = useState({ enabled: false, pixelsPerMillimeter: null });
+  const [statistics,      setStatistics]      = useState(null);
+  const [openCVStatus]                        = useState('READY');
 
-  // Vision Pipeline State
-  const [currentRoi,    setCurrentRoi]    = useState(null);
-  const [bubbleResult,  setBubbleResult]  = useState(null);
-  const [vizMode,       setVizMode]       = useState('ACCEPTED');
-  const [calibration]                     = useState({ enabled: false, pixelsPerMillimeter: null });
-  const [statistics,    setStatistics]    = useState(null);
+  const currentImgRef = useRef(null);
+  const workerRef     = useRef(null);
 
-  // ---------------------------------------------------------------------------
-  // Main OpenCV dual-branch analysis pipeline
-  // ---------------------------------------------------------------------------
-  const runOpenCVAnalysis = async (dataUrl) => {
+  // Initialise the Web Worker once on mount
+  useEffect(() => {
+    const worker = new Worker('/analysis-worker.js');
+
+    worker.onmessage = (e) => {
+      const { type } = e.data;
+
+      if (type === 'ready') {
+        console.log('✅ OpenCV Worker ready');
+      }
+
+      if (type === 'progress') {
+        setScanStatus(e.data.stage);
+      }
+
+      if (type === 'result') {
+        const res = e.data;
+
+        // Scale bubble pixel coords back to naturalWidth/naturalHeight display space
+        const scaleX = (res.originalWidth  || res.imageWidth)  / res.imageWidth;
+        const scaleY = (res.originalHeight || res.imageHeight) / res.imageHeight;
+
+        const scaleBubbles = (arr) => (arr || []).map(b => ({
+          ...b,
+          x:      Math.round(b.x      * scaleX),
+          y:      Math.round(b.y      * scaleY),
+          radius: Math.round(b.radius * ((scaleX + scaleY) / 2))
+        }));
+
+        const scaledBubbles   = scaleBubbles(res.bubbles);
+        const scaledRaw       = scaleBubbles(res.rawCandidates);
+        const scaledRejected  = scaleBubbles(res.rejectedCandidates);
+
+        const scaledRoi = {
+          center:  {
+            x: Math.round(res.roi.centerX * scaleX),
+            y: Math.round(res.roi.centerY * scaleY)
+          },
+          centerX: Math.round(res.roi.centerX * scaleX),
+          centerY: Math.round(res.roi.centerY * scaleY),
+          radius:  Math.round(res.roi.radius  * ((scaleX + scaleY) / 2)),
+          boundaryPoints: []
+        };
+
+        const formattedResult = {
+          acceptedBubbles:    scaledBubbles,
+          rawCandidates:      scaledRaw,
+          rejectedCandidates: scaledRejected,
+          bubbleCount:        scaledBubbles.length,
+          branchTelemetry:    res.branchTelemetry,
+          sizeBreakdown:      res.sizeBreakdown
+        };
+
+        // Compute statistics in main thread (pure JS, no OpenCV)
+        const stats = calculateBubbleStatistics(scaledBubbles, {
+          ...scaledRoi, type: 'circle'
+        }, calibration);
+
+        setBubbleResult(formattedResult);
+        setCurrentRoi(scaledRoi);
+        setStatistics(stats);
+        setMatrixTelemetry({
+          width:          res.originalWidth  || res.imageWidth,
+          height:         res.originalHeight || res.imageHeight,
+          model:          'OpenCV Dual-Branch (Hough + Contour) — Web Worker',
+          executionTimeMs: res.processingTimeMs,
+          isDemoFallback: false,
+          branchTelemetry: res.branchTelemetry,
+          sizeBreakdown:   res.sizeBreakdown
+        });
+
+        setIsScanning(false);
+        setScanStatus(null);
+      }
+
+      if (type === 'error') {
+        console.error('Worker error:', e.data.message);
+        setOpenCVError(e.data.message || 'OpenCV analysis failed in worker');
+        setIsScanning(false);
+        setScanStatus(null);
+      }
+    };
+
+    worker.onerror = (err) => {
+      console.error('Worker uncaught error:', err);
+      setOpenCVError('Worker crashed: ' + err.message);
+      setIsScanning(false);
+      setScanStatus(null);
+    };
+
+    workerRef.current = worker;
+    return () => worker.terminate();
+  }, []);
+
+  // ── Analysis trigger ────────────────────────────────────────────────────────
+  const runAnalysis = async (dataUrl) => {
     setIsScanning(true);
     setOpenCVError(null);
     setBubbleResult(null);
     setStatistics(null);
+    setScanStatus('PREPARING IMAGE');
 
     try {
-      // Ensure OpenCV WebAssembly is loaded
-      setScanStatus('LOADING OPENCV ENGINE');
-      if (!isOpenCVReady()) {
-        await loadOpenCV();
-      }
+      const { imageData, width, height, naturalWidth, naturalHeight } =
+        await dataUrlToImageData(dataUrl);
 
-      // Load the image as HTMLImageElement for imageToMat()
-      setScanStatus('ACQUIRING SPECIMEN');
-      const imgElement = await loadImageElement(dataUrl);
-      currentImgRef.current = imgElement;
+      setScanStatus('SENDING TO OPENCV WORKER');
 
-      // Run the full dual-branch pipeline
-      const result = await processSpecimenPipeline(
-        imgElement,
-        DEFAULT_PREPROCESSING_CONFIG,
-        DEFAULT_ROI_CONFIG,
-        DEFAULT_HOUGH_CONFIG,
-        DEFAULT_CONTOUR_CONFIG,
-        DEFAULT_FILTER_CONFIG,
-        calibration,
-        (stage) => setScanStatus(stage)
+      workerRef.current.postMessage(
+        { type: 'analyze', imageData, width, height,
+          originalWidth: naturalWidth, originalHeight: naturalHeight },
+        [imageData.buffer]   // Transfer ArrayBuffer (zero-copy)
       );
-
-      // Wire ROI to pixel coordinates for overlay rendering
-      const roiForOverlay = result.roi
-        ? {
-            center: { x: Math.round(result.roi.centerX), y: Math.round(result.roi.centerY) },
-            radius: Math.round(result.roi.radius),
-            boundaryPoints: []
-          }
-        : {
-            center: { x: Math.round(imgElement.naturalWidth / 2), y: Math.round(imgElement.naturalHeight / 2) },
-            radius: Math.round(Math.min(imgElement.naturalWidth, imgElement.naturalHeight) * 0.42),
-            boundaryPoints: []
-          };
-
-      setCurrentRoi(roiForOverlay);
-      setBubbleResult(result.bubbleResult);
-      setStatistics(result.statistics);
-
-      setMatrixTelemetry({
-        width: result.finalTelemetry.width,
-        height: result.finalTelemetry.height,
-        model: 'OpenCV Dual-Branch (Hough + Contour/Watershed)',
-        executionTimeMs: result.executionTimeMs,
-        isDemoFallback: false,
-        moondreamEngine: 'N/A — Full OpenCV Local',
-        branchTelemetry: result.bubbleResult?.branchTelemetry || {},
-        sizeBreakdown: result.bubbleResult?.sizeBreakdown || {}
-      });
-
     } catch (err) {
-      console.error('OpenCV Vision Pipeline Error:', err);
-      setOpenCVError(err.message || 'OpenCV Vision Analysis Failed');
-    } finally {
+      setOpenCVError(err.message || 'Failed to prepare image');
       setIsScanning(false);
       setScanStatus(null);
     }
   };
 
-  // Scroll to Upload Section
+  // ── Navigation helpers ──────────────────────────────────────────────────────
   const handleScrollToUpload = () => {
-    const uploadEl = document.getElementById('upload-section');
-    if (uploadEl) {
-      uploadEl.scrollIntoView({ behavior: 'smooth' });
-    } else {
-      window.scrollTo({ top: 500, behavior: 'smooth' });
-    }
+    const el = document.getElementById('upload-section');
+    if (el) el.scrollIntoView({ behavior: 'smooth' });
+    else window.scrollTo({ top: 500, behavior: 'smooth' });
   };
 
-  // Trigger Instant "TRY A DEMO SAMPLE" Specimen
   const handleTrySample = async (sample = SAMPLE_SPECIMENS[0]) => {
-    const sampleDataUrl = sample.getDataUrl();
-    setPreviewUrl(sampleDataUrl);
+    const url = sample.getDataUrl();
+    setPreviewUrl(url);
     setSelectedFile({ name: `${sample.title}.png`, size: 245000 });
-    await runOpenCVAnalysis(sampleDataUrl);
+    await runAnalysis(url);
   };
 
-  // File selection handler
   const handleFileSelect = async (file) => {
-    if (previewUrl && !previewUrl.startsWith('data:')) {
-      URL.revokeObjectURL(previewUrl);
-    }
+    if (previewUrl && !previewUrl.startsWith('data:')) URL.revokeObjectURL(previewUrl);
     const dataUrl = await fileToDataUrl(file);
     setSelectedFile(file);
     setPreviewUrl(dataUrl);
-    await runOpenCVAnalysis(dataUrl);
+    await runAnalysis(dataUrl);
   };
 
-  // Scan transition completed (animation done)
   const handleScanComplete = useCallback(() => {
     setIsScanning(false);
     setScanStatus(null);
   }, []);
 
-  // Reset to empty state
   const handleRunNewAnalysis = () => {
-    if (previewUrl && !previewUrl.startsWith('data:')) {
-      URL.revokeObjectURL(previewUrl);
-    }
+    if (previewUrl && !previewUrl.startsWith('data:')) URL.revokeObjectURL(previewUrl);
     setSelectedFile(null);
     setPreviewUrl(null);
     setIsScanning(false);
@@ -180,23 +228,19 @@ export default function App() {
     currentImgRef.current = null;
   };
 
-  // Image loaded in DOM view
   const handleImageLoaded = (imgElement) => {
-    if (!imgElement) return;
-    currentImgRef.current = imgElement;
+    if (imgElement) currentImgRef.current = imgElement;
   };
 
+  // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <MainLayout openCVStatus={openCVStatus} onReset={previewUrl ? handleRunNewAnalysis : null}>
-      {/* 1. Hero Section */}
       <Hero
         onCountClick={handleScrollToUpload}
         onTrySampleClick={() => handleTrySample(SAMPLE_SPECIMENS[0])}
       />
 
-      {/* 2. Main Workspace State Machine */}
       <div className="w-full my-4">
-        {/* State A: Empty State / Upload Zone */}
         {!previewUrl && (
           <UploadZone
             onFileSelect={handleFileSelect}
@@ -205,7 +249,6 @@ export default function App() {
           />
         )}
 
-        {/* State B: Analysis Scanning Transition Scene */}
         {previewUrl && isScanning && (
           <AnalysisScannerOverlay
             previewUrl={previewUrl}
@@ -214,7 +257,6 @@ export default function App() {
           />
         )}
 
-        {/* State C: Results Dashboard */}
         {previewUrl && !isScanning && (
           <ResultsDashboard
             file={selectedFile}

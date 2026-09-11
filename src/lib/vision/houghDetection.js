@@ -12,7 +12,7 @@
  */
 
 import { validateHoughConfig } from './config';
-import { extractCandidateFeatures, evaluateHoughCandidate } from './bubbleFilter';
+import { evaluateHoughCandidate } from './bubbleFilter';
 import { createRoiMaskMat } from './roiMask';
 import { deleteMat } from '../opencv';
 
@@ -81,22 +81,25 @@ export function detectHoughBubbles(preprocessedMat, roi, rawHoughConfig = {}, ra
 
       // Feature extraction
       const rawCandidate = {
-        id: `h_${i + 1}`,
-        x: Math.round(x),
-        y: Math.round(y),
-        radius: Math.round(r),
+        id:              `h_${i + 1}`,
+        x:               Math.round(x),
+        y:               Math.round(y),
+        radius:          Math.round(r),
         detectionMethod: 'hough'
       };
 
-      const features = extractCandidateFeatures(preprocessedMat, roi, rawCandidate);
-      const evalResult = evaluateHoughCandidate(rawCandidate, features, rawFilterConfig, config.minRadius, config.maxRadius);
+      // Geometry-only evaluation — no pixel loops
+      const evalResult = evaluateHoughCandidate(rawCandidate, roi, rawFilterConfig, config.minRadius, config.maxRadius);
 
       candidates.push({
         ...rawCandidate,
-        ...features,
-        confidence: evalResult.confidence,
-        isValid: evalResult.isValid,
-        reason: evalResult.reason || null
+        roiCoverage:   evalResult.roiCoverage,
+        localContrast: evalResult.localContrast,
+        edgeStrength:  evalResult.edgeStrength,
+        circularity:   evalResult.circularity,
+        confidence:    evalResult.confidence,
+        isValid:       evalResult.isValid,
+        reason:        evalResult.reason || null
       });
     }
   } finally {
